@@ -1,0 +1,238 @@
+# -*- coding: utf-8 -*-
+from dotenv import load_dotenv
+from pathlib import Path
+import os
+
+import discord
+from discord.ext import commands, tasks
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from config import CANAIS_FECHAMENTOS
+from core.database import criar_tabela, salvar_fechamento
+from core.cookie_store import criar_tabela_cookies, salvar_cookie
+
+from core.painel_api import (
+    buscar_creditos,
+    buscar_clientes_ativos,
+    buscar_testes_de_hoje,
+    buscar_novos_clientes_de_hoje,
+    buscar_renovacoes_de_hoje,
+    buscar_status_api,
+)
+
+# se você já criou: bot/renovar_cookies.py com async renovar_cookies_todos()
+from bot.renovar_cookies import renovar_cookies_todos
+
+
+# =====================
+# ENV
+# =====================
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+BR_TIMEZONE = timezone(timedelta(hours=-3))
+COR_PRINCIPAL = 0x7A2EFF
+
+BANNER_PATH = "assets/banner.png"
+THUMB_PATH = "assets/logo.png"
+
+CANAL_ALERTA = int(os.getenv("CANAL_ALERTA", "1467888153770721564"))
+
+HORARIOS_RENOVAR = {(7, 30), (14, 50), (22, 40)}
+HORARIOS_FECHAR = {(8, 0), (15, 0), (22, 0)}
+
+ULTIMO_ENVIO = {}          # painel -> "YYYY-MM-DD HH:MM"
+ULTIMO_RENOVAR = None      # "YYYY-MM-DD HH:MM"
+_ULTIMO_ALERTA = {}        # painel -> msg
+SCHEDULER_INICIADO = False
+
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+# =====================
+# ALERTA
+# =====================
+async def alertar_erro(msg: str, painel: Optional[str] = None) -> None:
+    try:
+        if painel:
+            if _ULTIMO_ALERTA.get(painel) == msg:
+                return
+            _ULTIMO_ALERTA[painel] = msg
+
+        canal = bot.get_channel(CANAL_ALERTA)
+        if canal is None:
+            canal = await bot.fetch_channel(CANAL_ALERTA)
+
+        await canal.send(f"?? **ALERTA**\n{msg}")
+    except Exception as e:
+        print(f"?? Falha ao enviar alerta: {e}")
+
+
+# =====================
+# RENOVAR COOKIES (Playwright)
+# =====================
+async def renovar_cookies_todos_paineis() -> None:
+    try:
+        cookies = await renovar_cookies_todos()  # dict: {"T1": "...", "T2": "..."}
+        for painel, cookie in cookies.items():
+            salvar_cookie(painel, cookie)
+
+        await alertar_erro("? Cookies renovados automaticamente (T1/T2/T3).")
+    except Exception as e:
+        await alertar_erro(f"? Falha ao renovar cookies: `{e}`")
+
+
+# =====================
+# COMANDO TESTE
+# =====================
+@bot.command()
+async def testar(ctx, painel: str = "T1"):
+    painel = painel.upper().strip()
+    if painel not in CANAIS_FECHAMENTOS:
+        return await ctx.send("Painel inválido. Use T1, T2 ou T3.")
+
+    await ctx.send(f"Testando fechamento para {painel}...")
+    await fechamento_automatico(painel)
+    await ctx.send("? Ok, enviei (ou tentei enviar) no canal do painel.")
+
+
+# =====================
+# FECHAMENTO
+# =====================
+async def fechamento_automatico(painel: str) -> None:
+    try:
+        creditos = buscar_creditos(painel)
+        clientes_ativos = buscar_clientes_ativos(painel)
+        testes_hoje = buscar_testes_de_hoje(painel)["total_hoje"]
+        novos_clientes_hoje = buscar_novos_clientes_de_hoje(painel)["total_hoje"]
+        renovacoes_hoje = buscar_renovacoes_de_hoje(painel)["total_hoje"]
+
+        status = buscar_status_api(painel)
+        api_ok = status["ok"]
+        status_txt = "? Ok" if api_ok == 1 else "? Erro"
+
+    except Exception as e:
+        err = str(e)
+        print(f"? Erro ao buscar métricas do painel {painel}: {err}")
+
+        if "HTTP 401" in err or "Unauthenticated" in err:
+            await alertar_erro(
+                f"Painel **{painel}**: sessão/cookie inválido.\nErro: `{err}`",
+                painel=painel,
+            )
+        else:
+            await alertar_erro(
+                f"Painel **{painel}**: falha ao buscar métricas.\nErro: `{err}`",
+                painel=painel,
+            )
+        return
+
+    canal_id = CANAIS_FECHAMENTOS[painel]
+    canal = bot.get_channel(canal_id)
+    if canal is None:
+        canal = await bot.fetch_channel(canal_id)
+
+    agora = datetime.now(BR_TIMEZONE)
+
+    embed = discord.Embed(
+        title="?? FECHAMENTO OFICIAL",
+        description=f"**Connect COMPANY**\nPainel {painel}",
+        color=COR_PRINCIPAL,
+        timestamp=agora,
+    )
+
+    embed.add_field(name="?? Créditos", value=f"{creditos:.2f}", inline=False)
+    embed.add_field(name="?? Clientes ativos", value=f"{clientes_ativos:,}".replace(",", "."), inline=False)
+    embed.add_field(name="?? Testes", value=str(testes_hoje), inline=False)
+    embed.add_field(name="?? Novos clientes", value=str(novos_clientes_hoje), inline=False)
+    embed.add_field(name="?? Renovações", value=str(renovacoes_hoje), inline=False)
+    embed.add_field(name="?? Status da API", value=status_txt, inline=False)
+
+    files = []
+    if os.path.exists(THUMB_PATH):
+        f = discord.File(THUMB_PATH, filename="logo.png")
+        files.append(f)
+        embed.set_thumbnail(url="attachment://logo.png")
+
+    if os.path.exists(BANNER_PATH):
+        f = discord.File(BANNER_PATH, filename="banner.png")
+        files.append(f)
+        embed.set_image(url="attachment://banner.png")
+
+    embed.set_footer(text="Connect Company  Sistema Automático")
+
+    if files:
+        await canal.send(embed=embed, files=files)
+    else:
+        await canal.send(embed=embed)
+
+    salvar_fechamento(
+        painel=painel,
+        creditos=creditos,
+        clientes=clientes_ativos,
+        testes=testes_hoje,
+        novos=novos_clientes_hoje,
+        renovacoes=renovacoes_hoje,
+        usuario="AUTO",
+        api_ok=api_ok,
+    )
+
+    print(f"? Fechamento enviado: {painel}")
+
+
+# =====================
+# SCHEDULER
+# =====================
+@tasks.loop(seconds=20)
+async def scheduler_fechamentos():
+    global ULTIMO_RENOVAR
+
+    agora = datetime.now(BR_TIMEZONE)
+    chave_minuto = agora.strftime("%Y-%m-%d %H:%M")
+    hm = (agora.hour, agora.minute)
+
+    # renovar 1x no minuto
+    if hm in HORARIOS_RENOVAR and ULTIMO_RENOVAR != chave_minuto:
+        ULTIMO_RENOVAR = chave_minuto
+        await renovar_cookies_todos_paineis()
+
+    # fechar 1x por painel no minuto
+    if hm in HORARIOS_FECHAR:
+        for painel in CANAIS_FECHAMENTOS:
+            if ULTIMO_ENVIO.get(painel) == chave_minuto:
+                continue
+            await fechamento_automatico(painel)
+            ULTIMO_ENVIO[painel] = chave_minuto
+
+
+# =====================
+# READY
+# =====================
+@bot.event
+async def on_ready():
+    global SCHEDULER_INICIADO
+
+    criar_tabela()
+    criar_tabela_cookies()
+    print("? Banco pronto")
+
+    if not SCHEDULER_INICIADO:
+        SCHEDULER_INICIADO = True
+        if not scheduler_fechamentos.is_running():
+            scheduler_fechamentos.start()
+
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("DISCORD_TOKEN não configurado no .env")
+    bot.run(TOKEN)
+
+
+if __name__ == "__main__":
+    main()
