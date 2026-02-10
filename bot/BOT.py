@@ -68,7 +68,7 @@ BANNER_PATH = "assets/banner.png"
 THUMB_PATH = "assets/connect-logo.png"
 
 # Fechamentos
-HORARIOS_FECHAR = {(10, 0), (13, 0), (18, 50), (22, 0), (0, 0)}
+HORARIOS_FECHAR = {(10, 0), (13, 0), (19, 0), (22, 0), (0, 0)}
 
 # RH
 HORARIO_RH_DIARIO = {(23, 5)}
