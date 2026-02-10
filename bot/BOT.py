@@ -130,6 +130,34 @@ async def alertar_erro(msg: str, painel: Optional[str] = None) -> None:
         await canal.send(f"🚨 **ALERTA**\n{msg}")
     except Exception as e:
         print(f"❌ Falha ao enviar alerta: {e}")
+# =====================
+# COMANDO ÚNICO: TESTAR T2
+# =====================
+@bot.command()
+async def testar(ctx, painel: str = "t2"):
+    """
+    Uso:
+      !testar
+      !testar t2
+      !testar t1
+    """
+    painel = (painel or "t2").upper().strip()
+
+    if painel not in CANAIS_FECHAMENTOS:
+        await ctx.send(f"❌ Painel inválido: `{painel}`. Disponíveis: {', '.join(CANAIS_FECHAMENTOS.keys())}")
+        return
+
+    msg = await ctx.send(f"⏳ Testando fechamento do **{painel}**...")
+
+    try:
+        ok = await fechamento_automatico(painel)
+        if ok:
+            await msg.edit(content=f"✅ Fechamento do **{painel}** enviado com sucesso.")
+        else:
+            await msg.edit(content=f"⚠️ Falha no fechamento do **{painel}**. Veja o canal de alertas.")
+    except Exception as e:
+        await msg.edit(content=f"❌ Erro ao testar **{painel}**: `{e}`")
+
 
 # =====================
 # COMANDO ÚNICO: TEST RH

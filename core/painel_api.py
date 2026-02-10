@@ -13,7 +13,7 @@ BR_TIMEZONE = timezone(timedelta(hours=-3))
 
 OWNER_ID_POR_PAINEL = {
     "T1": 157,
-    "T2": "",
+    "T2": 156,
     "T3": "",
 }
 
@@ -62,7 +62,7 @@ def _get_json(painel: str, path: str, params=None, headers=None) -> dict:
 
         except (ReadTimeout, ConnectTimeout) as e:
             last_err = e
-            time.sleep(attempt)  # 1s, 2s, 3s
+            time.sleep(attempt)  
             continue
         except RequestException as e:
             last_err = e
