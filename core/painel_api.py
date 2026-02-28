@@ -14,7 +14,7 @@ BR_TIMEZONE = timezone(timedelta(hours=-3))
 OWNER_ID_POR_PAINEL = {
     "T1": 157,
     "T2": 156,
-    "T3": 158,
+    "T3": 158,  # teste
 }
 
 # =====================
@@ -46,7 +46,7 @@ def _get_json(painel: str, path: str, params=None, headers=None) -> dict:
 
     last_err = None
 
-    for attempt in range(1, 4):  # 3 tentativas
+    for attempt in range(1, 4):
         try:
             r = s.get(url, headers=headers, params=params, timeout=35)
 
@@ -55,14 +55,14 @@ def _get_json(painel: str, path: str, params=None, headers=None) -> dict:
                 r = s.get(url, headers=headers, params=params, timeout=35)
 
             if r.status_code != 200:
-                txt = (r.text or "")[:200].replace("\n", " ")
+                txt = (r.text or "")[:250].replace("\n", " ")
                 raise Exception(f"HTTP {r.status_code} em {path} | resp: {txt} | tentativa {attempt}/3")
 
             return r.json()
 
         except (ReadTimeout, ConnectTimeout) as e:
             last_err = e
-            time.sleep(attempt)  
+            time.sleep(attempt)
             continue
         except RequestException as e:
             last_err = e
@@ -74,12 +74,12 @@ def _get_json(painel: str, path: str, params=None, headers=None) -> dict:
     raise Exception(f"Falha ao acessar {path} (tentativas 3/3): {last_err}")
 
 # =====================
-# PARSE DATE (created_at do LOG)
+# HELPERS
 # =====================
 def _parse_created_at_br(created_at: str) -> Optional[datetime]:
     if not created_at:
         return None
-    created_at = created_at.strip()
+    created_at = str(created_at).strip()
     for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S"):
         try:
             return datetime.strptime(created_at, fmt).replace(tzinfo=BR_TIMEZONE)
@@ -105,8 +105,6 @@ def _to_float(v) -> float:
             return 0.0
 
         s = s.replace("R$", "").replace(" ", "")
-
-        # 1.234,56 -> 1234.56
         if "," in s and "." in s:
             s = s.replace(".", "").replace(",", ".")
         else:
@@ -116,35 +114,31 @@ def _to_float(v) -> float:
     except Exception:
         return 0.0
 
+def _tipo_transacao(item: dict) -> str:
+    return (
+        str(
+            item.get("transaction_type")
+            or item.get("type")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
 
-def _extrair_valor_item(item: dict) -> float:
-    """
-    Tenta descobrir o valor financeiro do log usando várias chaves possíveis.
-    """
-    for chave in (
-        "amount",
-        "value",
-        "valor",
-        "price",
-        "total",
-        "credit",
-        "credits",
-        "used_credits",
-        "sale_value",
-        "paid_value",
-    ):
-        if chave in item and item.get(chave) not in (None, "", "null"):
+def _valor_item(item: dict) -> float:
+    # no teu JSON veio "value"
+    for chave in ("value", "valor", "amount", "price", "total"):
+        if chave in item:
             valor = _to_float(item.get(chave))
-            if valor:
+            if valor >= 0:
                 return valor
-
-    # fallback: algumas APIs jogam dentro de campos aninhados/estranhos
-    for _, v in item.items():
-        if isinstance(v, (int, float)):
-            if float(v) > 0:
-                return float(v)
-
     return 0.0
+
+def _owner_do_painel(painel: str) -> int:
+    owner_id = OWNER_ID_POR_PAINEL.get(painel)
+    if owner_id in (None, "", 0):
+        raise Exception(f"OWNER_ID não configurado para o painel {painel}")
+    return int(owner_id)
 
 # =====================
 # BUSCAR CRÉDITOS
@@ -200,7 +194,7 @@ def buscar_testes_de_hoje(painel: str, page_size: int = 100) -> Dict:
     hoje = datetime.now(BR_TIMEZONE).date()
     total = 0
     start = 0
-    owner_id = OWNER_ID_POR_PAINEL[painel]
+    owner_id = _owner_do_painel(painel)
 
     while True:
         data = _get_json(
@@ -215,7 +209,7 @@ def buscar_testes_de_hoje(painel: str, page_size: int = 100) -> Dict:
             break
 
         for item in itens:
-            t = (item.get("type") or "").strip().lower()
+            t = _tipo_transacao(item)
             if t != "novo_teste":
                 continue
 
@@ -231,16 +225,16 @@ def buscar_testes_de_hoje(painel: str, page_size: int = 100) -> Dict:
 
     return {"total_hoje": total}
 
-
 # =====================
 # NOVOS CLIENTES DO DIA
 # =====================
 def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
     hoje = datetime.now(BR_TIMEZONE).date()
-    owner_id = OWNER_ID_POR_PAINEL[painel]
+    owner_id = _owner_do_painel(painel)
 
     total = 0
     unicos = set()
+    valor_total = 0.0
     start = 0
 
     while True:
@@ -256,7 +250,7 @@ def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
             break
 
         for item in itens:
-            t = (item.get("type") or "").strip().lower()
+            t = _tipo_transacao(item)
             if t != "novo_cliente":
                 continue
 
@@ -269,26 +263,29 @@ def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
                 continue
 
             total += 1
+            valor_total += _valor_item(item)
+
             rid = item.get("recipient_id")
             if rid is not None:
                 unicos.add(str(rid))
 
         start += page_size
 
-    return {"total_hoje": total, "unicos_hoje": len(unicos)}
-
+    return {
+        "total_hoje": total,
+        "unicos_hoje": len(unicos),
+        "valor_total": round(valor_total, 2),
+    }
 
 # =====================
 # RENOVAÇÕES DO DIA
 # =====================
-def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
+def buscar_renovacoes_de_hoje(painel: str, page_size: int = 200) -> Dict:
     hoje = datetime.now(BR_TIMEZONE).date()
-    owner_id = OWNER_ID_POR_PAINEL[painel]
+    owner_id = _owner_do_painel(painel)
 
-    novos_qtd = 0
-    novos_total = 0.0
-    renov_qtd = 0
-    renov_total = 0.0
+    total = 0
+    valor_total = 0.0
     start = 0
 
     while True:
@@ -304,6 +301,10 @@ def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
             break
 
         for item in itens:
+            t = _tipo_transacao(item)
+            if t != "renovacao":
+                continue
+
             oid = _to_int(item.get("owner_id"))
             if oid != owner_id:
                 continue
@@ -312,20 +313,28 @@ def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
             if not dt or dt.date() != hoje:
                 continue
 
-            t = (item.get("type") or "").strip().lower()
-            valor = _extrair_valor_item(item)
-
-            if t == "novo_cliente":
-                novos_qtd += 1
-                novos_total += valor
-
-            elif t == "renovacao":
-                renov_qtd += 1
-                renov_total += valor
+            total += 1
+            valor_total += _valor_item(item)
 
         start += page_size
 
-    total_geral = novos_total + renov_total
+    return {
+        "total_hoje": total,
+        "valor_total": round(valor_total, 2),
+    }
+
+# =====================
+# FINANCEIRO DO DIA
+# =====================
+def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
+    novos = buscar_novos_clientes_de_hoje(painel, page_size=page_size)
+    renov = buscar_renovacoes_de_hoje(painel, page_size=page_size)
+
+    novos_qtd = int(novos.get("total_hoje", 0) or 0)
+    novos_total = float(novos.get("valor_total", 0.0) or 0.0)
+
+    renov_qtd = int(renov.get("total_hoje", 0) or 0)
+    renov_total = float(renov.get("valor_total", 0.0) or 0.0)
 
     return {
         "painel": painel,
@@ -333,9 +342,8 @@ def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
         "novos_total": round(novos_total, 2),
         "renov_qtd": renov_qtd,
         "renov_total": round(renov_total, 2),
-        "total_geral": round(total_geral, 2),
+        "total_geral": round(novos_total + renov_total, 2),
     }
-
 
 # =====================
 # STATUS DA API
@@ -356,7 +364,6 @@ def buscar_status_api(painel: str) -> dict:
         if st == "connected":
             return {"ok": 1, "status": "connected"}
 
-    # senão, devolve o primeiro status válido
     st0 = (itens[0].get("status") or "unknown").lower().strip()
     return {"ok": 0, "status": st0}
 
@@ -374,7 +381,7 @@ def debug_logs(painel: str):
     print("len(data):", len(itens))
     if itens:
         print("ITEM 0:", itens[0])
-        print("TIPOS:", sorted({(i.get('type') or '') for i in itens}))
+        print("TRANSACTION_TYPES:", sorted({str(i.get('transaction_type') or i.get('type') or '') for i in itens}))
         print("OWNER_IDS:", sorted({str(i.get('owner_id')) for i in itens}))
         print("CREATED_AT:", [i.get("created_at") for i in itens])
     return data
