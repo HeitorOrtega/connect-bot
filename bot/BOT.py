@@ -65,7 +65,7 @@ MINIMO_RH = float(os.getenv("MINIMO_RH", "0.50"))
 # Comissão: qual painel define o pool às 23:00
 COMMISSION_PAINEL = (os.getenv("COMMISSION_PAINEL", "T1") or "T1").upper().strip()
 
-# Timezone / visual
+# Visual / fuso
 BR_TIMEZONE = timezone(timedelta(hours=-3))
 COR_PRINCIPAL = 0x7A2EFF
 
@@ -73,16 +73,22 @@ COR_PRINCIPAL = 0x7A2EFF
 BANNER_PATH = "assets/banner.png"
 THUMB_PATH = "assets/connect-logo.png"
 
-# Horários dos fechamentos automáticos
-HORARIOS_FECHAR = {(10, 0), (13, 0), (19, 0), (22, 0), (0, 0)}
+# =====================
+# HORÁRIOS
+# =====================
+# Fechamentos automáticos dos painéis
+HORARIOS_FECHAR = {(12, 0), (17, 0), (20, 0), (23, 30)}
 
-# Horários do financeiro consolidado
+# Financeiro consolidado
 HORARIOS_FINANCEIRO = {(15, 0), (23, 0)}
 
-# Horários RH
+# RH
 HORARIO_RH_DIARIO = {(23, 5)}
 HORARIO_RH_MENSAL = {(23, 10)}
 
+# =====================
+# CONTROLE INTERNO
+# =====================
 # Anti-duplicação por minuto (processo)
 ULTIMO_ENVIO: dict[str, str] = {}
 _ULTIMO_ALERTA: dict[str, str] = {}
@@ -117,12 +123,12 @@ def get_turno(dt: datetime) -> tuple[str, str]:
 
 
 def _fmt_money(v: float) -> str:
-    """Formata dinheiro em padrão BR."""
+    """Formata valor monetário em padrão BR."""
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def _ultimo_dia_do_mes(d: date) -> date:
-    """Retorna o último dia do mês de uma data."""
+    """Retorna o último dia do mês."""
     if d.month == 12:
         prox = date(d.year + 1, 1, 1)
     else:
@@ -212,7 +218,7 @@ async def testrh(ctx):
 
 
 # =====================
-# COLETA / HELPERS
+# HELPERS DE COLETA
 # =====================
 def _pegar_total_hoje(resp) -> int:
     """Extrai total de respostas flexíveis vindas da API."""
@@ -237,7 +243,7 @@ def _pegar_total_hoje(resp) -> int:
 def coletar_metricas_sync(painel: str) -> dict:
     """
     Coleta as métricas do fechamento do painel.
-    Roda em thread para não travar o loop do Discord.
+    Executa em thread para não travar o loop do Discord.
     """
     r_testes = buscar_testes_de_hoje(painel)
     r_novos = buscar_novos_clientes_de_hoje(painel)
@@ -351,7 +357,7 @@ async def fechamento_automatico(painel: str) -> bool:
         chave_minuto = agora.strftime("%Y-%m-%d %H:%M")
         key_dedupe = f"FECH_SEND_{painel}"
 
-        # evita duplicidade no mesmo minuto
+        # Evita duplicidade no mesmo minuto
         if ULTIMO_ENVIO.get(key_dedupe) == chave_minuto:
             return True
         ULTIMO_ENVIO[key_dedupe] = chave_minuto
@@ -368,7 +374,15 @@ async def fechamento_automatico(painel: str) -> bool:
             status = dados["status"]
             api_ok = int(status.get("ok", 0))
             raw_status = (status.get("status") or "unknown").strip().lower()
-            status_txt = "✅ Ok" if api_ok == 1 else f"❌ Erro ({raw_status})"
+
+            if api_ok == 1:
+                status_txt = "✅ Ok"
+            elif raw_status == "sem_instancia":
+                status_txt = "⚠️ Sem instância"
+            elif raw_status == "sem_status":
+                status_txt = "⚠️ Sem status"
+            else:
+                status_txt = f"❌ Erro ({raw_status})"
 
         except Exception as e:
             err = str(e)

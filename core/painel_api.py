@@ -166,13 +166,9 @@ def _owner_do_painel(painel: str) -> int:
 
 def _data_referencia_financeiro() -> date:
     """
-    Se testar após meia-noite, usa o dia anterior até 02:59.
-    Evita financeiro zerado em testes.
+    Retorna sempre a data de hoje no fuso BR.
     """
-    agora = datetime.now(BR_TIMEZONE)
-    if agora.hour < 3:
-        return (agora - timedelta(days=1)).date()
-    return agora.date()
+    return datetime.now(BR_TIMEZONE).date()
 
 
 # =====================
