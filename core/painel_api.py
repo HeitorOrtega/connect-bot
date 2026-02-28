@@ -14,7 +14,7 @@ BR_TIMEZONE = timezone(timedelta(hours=-3))
 OWNER_ID_POR_PAINEL = {
     "T1": 157,
     "T2": 156,
-    "T3": "",
+    "T3": 158,
 }
 
 # =====================
@@ -93,6 +93,58 @@ def _to_int(v) -> Optional[int]:
     except Exception:
         return None
 
+def _to_float(v) -> float:
+    try:
+        if v is None:
+            return 0.0
+        if isinstance(v, (int, float)):
+            return float(v)
+
+        s = str(v).strip()
+        if not s:
+            return 0.0
+
+        s = s.replace("R$", "").replace(" ", "")
+
+        # 1.234,56 -> 1234.56
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", ".")
+
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _extrair_valor_item(item: dict) -> float:
+    """
+    Tenta descobrir o valor financeiro do log usando várias chaves possíveis.
+    """
+    for chave in (
+        "amount",
+        "value",
+        "valor",
+        "price",
+        "total",
+        "credit",
+        "credits",
+        "used_credits",
+        "sale_value",
+        "paid_value",
+    ):
+        if chave in item and item.get(chave) not in (None, "", "null"):
+            valor = _to_float(item.get(chave))
+            if valor:
+                return valor
+
+    # fallback: algumas APIs jogam dentro de campos aninhados/estranhos
+    for _, v in item.items():
+        if isinstance(v, (int, float)):
+            if float(v) > 0:
+                return float(v)
+
+    return 0.0
 
 # =====================
 # BUSCAR CRÉDITOS
@@ -229,11 +281,14 @@ def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
 # =====================
 # RENOVAÇÕES DO DIA
 # =====================
-def buscar_renovacoes_de_hoje(painel: str, page_size: int = 200) -> Dict:
+def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
     hoje = datetime.now(BR_TIMEZONE).date()
     owner_id = OWNER_ID_POR_PAINEL[painel]
 
-    total = 0
+    novos_qtd = 0
+    novos_total = 0.0
+    renov_qtd = 0
+    renov_total = 0.0
     start = 0
 
     while True:
@@ -249,21 +304,37 @@ def buscar_renovacoes_de_hoje(painel: str, page_size: int = 200) -> Dict:
             break
 
         for item in itens:
-            t = (item.get("type") or "").strip().lower()
-            if t != "renovacao":
-                continue
-
             oid = _to_int(item.get("owner_id"))
             if oid != owner_id:
                 continue
 
             dt = _parse_created_at_br(item.get("created_at", ""))
-            if dt and dt.date() == hoje:
-                total += 1
+            if not dt or dt.date() != hoje:
+                continue
+
+            t = (item.get("type") or "").strip().lower()
+            valor = _extrair_valor_item(item)
+
+            if t == "novo_cliente":
+                novos_qtd += 1
+                novos_total += valor
+
+            elif t == "renovacao":
+                renov_qtd += 1
+                renov_total += valor
 
         start += page_size
 
-    return {"total_hoje": total}
+    total_geral = novos_total + renov_total
+
+    return {
+        "painel": painel,
+        "novos_qtd": novos_qtd,
+        "novos_total": round(novos_total, 2),
+        "renov_qtd": renov_qtd,
+        "renov_total": round(renov_total, 2),
+        "total_geral": round(total_geral, 2),
+    }
 
 
 # =====================
