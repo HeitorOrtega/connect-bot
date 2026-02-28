@@ -1,5 +1,5 @@
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import Optional, Dict
 from urllib.parse import unquote
 
@@ -11,16 +11,23 @@ from core.auth_painel import get_session, ensure_logged, login_painel
 BASE_URL = "https://crm.hpanel.vip"
 BR_TIMEZONE = timezone(timedelta(hours=-3))
 
+# =====================
+# OWNER_ID POR PAINEL
+# =====================
 OWNER_ID_POR_PAINEL = {
     "T1": 157,
     "T2": 156,
-    "T3": 160,  
+    "T3": 160,
 }
+
 
 # =====================
 # HEADERS AJAX
 # =====================
 def _headers_ajax(painel: str, referer_path: str) -> dict:
+    """
+    Monta headers padrão AJAX com XSRF do painel logado.
+    """
     s = get_session(painel)
     xsrf = s.cookies.get("XSRF-TOKEN")
     xsrf = unquote(xsrf) if xsrf else None
@@ -32,14 +39,23 @@ def _headers_ajax(painel: str, referer_path: str) -> dict:
         "Referer": f"{BASE_URL}{referer_path}",
         "Origin": BASE_URL,
     }
+
     if xsrf:
         headers["X-XSRF-TOKEN"] = xsrf
+
     return headers
 
+
 # =====================
-# GET JSON (retry + timeout + relogin)
+# REQUEST JSON COM RETRY
 # =====================
 def _get_json(painel: str, path: str, params=None, headers=None) -> dict:
+    """
+    Faz GET JSON com:
+    - ensure_logged
+    - retry
+    - relogin automático em 401/419
+    """
     ensure_logged(painel)
     s = get_session(painel)
     url = f"{BASE_URL}{path}"
@@ -73,19 +89,25 @@ def _get_json(painel: str, path: str, params=None, headers=None) -> dict:
 
     raise Exception(f"Falha ao acessar {path} (tentativas 3/3): {last_err}")
 
+
 # =====================
 # HELPERS
 # =====================
 def _parse_created_at_br(created_at: str) -> Optional[datetime]:
+    """Converte data BR do painel para datetime timezone-aware."""
     if not created_at:
         return None
+
     created_at = str(created_at).strip()
+
     for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S"):
         try:
             return datetime.strptime(created_at, fmt).replace(tzinfo=BR_TIMEZONE)
         except Exception:
             pass
+
     return None
+
 
 def _to_int(v) -> Optional[int]:
     try:
@@ -93,10 +115,18 @@ def _to_int(v) -> Optional[int]:
     except Exception:
         return None
 
+
 def _to_float(v) -> float:
+    """
+    Converte valores monetários:
+    - 30.00
+    - 30,00
+    - R$ 30,00
+    """
     try:
         if v is None:
             return 0.0
+
         if isinstance(v, (int, float)):
             return float(v)
 
@@ -105,6 +135,7 @@ def _to_float(v) -> float:
             return 0.0
 
         s = s.replace("R$", "").replace(" ", "")
+
         if "," in s and "." in s:
             s = s.replace(".", "").replace(",", ".")
         else:
@@ -114,40 +145,47 @@ def _to_float(v) -> float:
     except Exception:
         return 0.0
 
-def _tipo_transacao(item: dict) -> str:
-    return (
-        str(
-            item.get("transaction_type")
-            or item.get("type")
-            or ""
-        )
-        .strip()
-        .lower()
-    )
 
-def _valor_item(item: dict) -> float:
-    # no teu JSON veio "value"
-    for chave in ("value", "valor", "amount", "price", "total"):
-        if chave in item:
-            valor = _to_float(item.get(chave))
-            if valor >= 0:
-                return valor
-    return 0.0
+def _tipo_transacao(item: dict) -> str:
+    """
+    Lê o tipo da transação do item.
+    Aceita transaction_type ou type.
+    """
+    return str(item.get("transaction_type") or item.get("type") or "").strip().lower()
+
 
 def _owner_do_painel(painel: str) -> int:
+    """
+    Retorna owner_id do painel.
+    """
     owner_id = OWNER_ID_POR_PAINEL.get(painel)
     if owner_id in (None, "", 0):
         raise Exception(f"OWNER_ID não configurado para o painel {painel}")
     return int(owner_id)
 
+
+def _data_referencia_financeiro() -> date:
+    """
+    Se testar após meia-noite, usa o dia anterior até 02:59.
+    Evita financeiro zerado em testes.
+    """
+    agora = datetime.now(BR_TIMEZONE)
+    if agora.hour < 3:
+        return (agora - timedelta(days=1)).date()
+    return agora.date()
+
+
 # =====================
-# BUSCAR CRÉDITOS
+# MÉTRICAS DO FECHAMENTO
 # =====================
 def buscar_creditos(painel: str) -> float:
+    """
+    Busca créditos disponíveis do painel.
+    """
     data = _get_json(
         painel,
         "/users/credits",
-        headers=_headers_ajax(painel, "/users")
+        headers=_headers_ajax(painel, "/users"),
     )
 
     if not data.get("success"):
@@ -159,10 +197,11 @@ def buscar_creditos(painel: str) -> float:
 
     return float(creditos)
 
-# =====================
-# BUSCAR CLIENTES ATIVOS
-# =====================
+
 def buscar_clientes_ativos(painel: str) -> int:
+    """
+    Busca total de clientes ativos.
+    """
     params = {
         "draw": 1,
         "start": 0,
@@ -179,7 +218,7 @@ def buscar_clientes_ativos(painel: str) -> int:
         painel,
         "/customers",
         params=params,
-        headers=_headers_ajax(painel, "/customers")
+        headers=_headers_ajax(painel, "/customers"),
     )
 
     if "recordsTotal" not in data:
@@ -187,10 +226,11 @@ def buscar_clientes_ativos(painel: str) -> int:
 
     return int(data["recordsTotal"])
 
-# =====================
-# TESTES DO DIA
-# =====================
+
 def buscar_testes_de_hoje(painel: str, page_size: int = 100) -> Dict:
+    """
+    Busca quantidade de testes do dia via logs.
+    """
     hoje = datetime.now(BR_TIMEZONE).date()
     total = 0
     start = 0
@@ -201,7 +241,7 @@ def buscar_testes_de_hoje(painel: str, page_size: int = 100) -> Dict:
             painel,
             "/logs-credit-consumptions",
             params={"draw": 1, "start": start, "length": page_size},
-            headers=_headers_ajax(painel, "/logs-credit-consumptions")
+            headers=_headers_ajax(painel, "/logs-credit-consumptions"),
         )
 
         itens = data.get("data") or []
@@ -209,8 +249,7 @@ def buscar_testes_de_hoje(painel: str, page_size: int = 100) -> Dict:
             break
 
         for item in itens:
-            t = _tipo_transacao(item)
-            if t != "novo_teste":
+            if _tipo_transacao(item) != "novo_teste":
                 continue
 
             oid = _to_int(item.get("owner_id"))
@@ -225,183 +264,22 @@ def buscar_testes_de_hoje(painel: str, page_size: int = 100) -> Dict:
 
     return {"total_hoje": total}
 
-# =====================
-# NOVOS CLIENTES DO DIA
-# =====================
-def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
-    hoje = datetime.now(BR_TIMEZONE).date()
-    owner_id = _owner_do_painel(painel)
-
-    total = 0
-    unicos = set()
-    valor_total = 0.0
-    start = 0
-
-    while True:
-        data = _get_json(
-            painel,
-            "/logs-credit-consumptions",
-            params={"draw": 1, "start": start, "length": page_size},
-            headers=_headers_ajax(painel, "/logs-credit-consumptions")
-        )
-
-        itens = data.get("data") or []
-        if not itens:
-            break
-
-        for item in itens:
-            t = _tipo_transacao(item)
-            if t != "novo_cliente":
-                continue
-
-            oid = _to_int(item.get("owner_id"))
-            if oid != owner_id:
-                continue
-
-            dt = _parse_created_at_br(item.get("created_at", ""))
-            if not dt or dt.date() != hoje:
-                continue
-
-            total += 1
-            valor_total += _valor_item(item)
-
-            rid = item.get("recipient_id")
-            if rid is not None:
-                unicos.add(str(rid))
-
-        start += page_size
-
-    return {
-        "total_hoje": total,
-        "unicos_hoje": len(unicos),
-        "valor_total": round(valor_total, 2),
-    }
 
 # =====================
-# RENOVAÇÕES DO DIA
+# FINANCEIRO / REVENUES
 # =====================
-def buscar_renovacoes_de_hoje(painel: str, page_size: int = 200) -> Dict:
-    hoje = datetime.now(BR_TIMEZONE).date()
-    owner_id = _owner_do_painel(painel)
-
-    total = 0
-    valor_total = 0.0
-    start = 0
-
-    while True:
-        data = _get_json(
-            painel,
-            "/logs-credit-consumptions",
-            params={"draw": 1, "start": start, "length": page_size},
-            headers=_headers_ajax(painel, "/logs-credit-consumptions")
-        )
-
-        itens = data.get("data") or []
-        if not itens:
-            break
-
-        for item in itens:
-            t = _tipo_transacao(item)
-            if t != "renovacao":
-                continue
-
-            oid = _to_int(item.get("owner_id"))
-            if oid != owner_id:
-                continue
-
-            dt = _parse_created_at_br(item.get("created_at", ""))
-            if not dt or dt.date() != hoje:
-                continue
-
-            total += 1
-            valor_total += _valor_item(item)
-
-        start += page_size
-
-    return {
-        "total_hoje": total,
-        "valor_total": round(valor_total, 2),
-    }
-
-# =====================
-# FINANCEIRO DO DIA
-# =====================
-def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
-    novos = buscar_novos_clientes_de_hoje(painel, page_size=page_size)
-    renov = buscar_renovacoes_de_hoje(painel, page_size=page_size)
-
-    novos_qtd = int(novos.get("total_hoje", 0) or 0)
-    novos_total = float(novos.get("valor_total", 0.0) or 0.0)
-
-    renov_qtd = int(renov.get("total_hoje", 0) or 0)
-    renov_total = float(renov.get("valor_total", 0.0) or 0.0)
-
-    return {
-        "painel": painel,
-        "novos_qtd": novos_qtd,
-        "novos_total": round(novos_total, 2),
-        "renov_qtd": renov_qtd,
-        "renov_total": round(renov_total, 2),
-        "total_geral": round(novos_total + renov_total, 2),
-    }
-
-# =====================
-# STATUS DA API
-# =====================
-def buscar_status_api(painel: str) -> dict:
-    data = _get_json(
-        painel,
-        "/zapipro-instances",
-        headers=_headers_ajax(painel, "/zapipro-instances")
-    )
-
-    itens = data.get("data") or []
-    if not itens:
-        return {"ok": 0, "status": "unknown"}
-
-    for it in itens:
-        st = (it.get("status") or "").lower().strip()
-        if st == "connected":
-            return {"ok": 1, "status": "connected"}
-
-    st0 = (itens[0].get("status") or "unknown").lower().strip()
-    return {"ok": 0, "status": st0}
-
-def debug_logs(painel: str):
-    data = _get_json(
-        painel,
-        "/logs-credit-consumptions",
-        params={"draw": 1, "start": 0, "length": 5},
-        headers=_headers_ajax(painel, "/logs-credit-consumptions")
-    )
-    print("CHAVES:", list(data.keys()))
-    print("recordsTotal:", data.get("recordsTotal"))
-    print("recordsFiltered:", data.get("recordsFiltered"))
-    itens = data.get("data") or []
-    print("len(data):", len(itens))
-    if itens:
-        print("ITEM 0:", itens[0])
-        print("TRANSACTION_TYPES:", sorted({str(i.get('transaction_type') or i.get('type') or '') for i in itens}))
-        print("OWNER_IDS:", sorted({str(i.get('owner_id')) for i in itens}))
-        print("CREATED_AT:", [i.get("created_at") for i in itens])
-    return data
-
-def _data_referencia_financeiro() -> datetime.date:
-    """
-    Se testar logo após a meia-noite, usa o dia anterior para não vir zerado.
-    """
-    agora = datetime.now(BR_TIMEZONE)
-    if agora.hour < 3:
-        return (agora - timedelta(days=1)).date()
-    return agora.date()
-
-
 def _buscar_revenues_filtrado(
     painel: str,
     transaction_type: str,
-    dia_ref=None,
-    page_size: int = 200
+    dia_ref: Optional[date] = None,
+    page_size: int = 200,
 ) -> Dict:
+    """
+    Busca receitas filtrando por:
+    - painel (owner_id)
+    - transaction_type
+    - dia de referência
+    """
     if dia_ref is None:
         dia_ref = _data_referencia_financeiro()
 
@@ -419,7 +297,7 @@ def _buscar_revenues_filtrado(
                 "start": start,
                 "length": page_size,
             },
-            headers=_headers_ajax(painel, "/revenues")
+            headers=_headers_ajax(painel, "/revenues"),
         )
 
         itens = data.get("data") or []
@@ -431,7 +309,7 @@ def _buscar_revenues_filtrado(
             if oid != owner_id:
                 continue
 
-            t = str(item.get("transaction_type") or "").strip().lower()
+            t = _tipo_transacao(item)
             if t != transaction_type:
                 continue
 
@@ -452,6 +330,9 @@ def _buscar_revenues_filtrado(
 
 
 def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
+    """
+    Busca quantidade e valor de novos clientes no dia.
+    """
     r = _buscar_revenues_filtrado(painel, "novo_cliente", page_size=page_size)
     return {
         "total_hoje": r["qtd"],
@@ -461,6 +342,9 @@ def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
 
 
 def buscar_renovacoes_de_hoje(painel: str, page_size: int = 200) -> Dict:
+    """
+    Busca quantidade e valor de renovações no dia.
+    """
     r = _buscar_revenues_filtrado(painel, "renovacao", page_size=page_size)
     return {
         "total_hoje": r["qtd"],
@@ -470,6 +354,9 @@ def buscar_renovacoes_de_hoje(painel: str, page_size: int = 200) -> Dict:
 
 
 def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
+    """
+    Consolida financeiro diário do painel.
+    """
     novos = buscar_novos_clientes_de_hoje(painel, page_size=page_size)
     renov = buscar_renovacoes_de_hoje(painel, page_size=page_size)
 
@@ -490,3 +377,59 @@ def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
         "renov_total": round(renov_total, 2),
         "total_geral": round(novos_total + renov_total, 2),
     }
+
+
+# =====================
+# STATUS DA API
+# =====================
+def buscar_status_api(painel: str) -> dict:
+    """
+    Verifica status da API / instância conectada.
+    """
+    data = _get_json(
+        painel,
+        "/zapipro-instances",
+        headers=_headers_ajax(painel, "/zapipro-instances"),
+    )
+
+    itens = data.get("data") or []
+    if not itens:
+        return {"ok": 0, "status": "unknown"}
+
+    for it in itens:
+        st = (it.get("status") or "").lower().strip()
+        if st == "connected":
+            return {"ok": 1, "status": "connected"}
+
+    st0 = (itens[0].get("status") or "unknown").lower().strip()
+    return {"ok": 0, "status": st0}
+
+
+# =====================
+# DEBUG
+# =====================
+def debug_logs(painel: str):
+    """
+    Debug simples dos logs de consumo.
+    """
+    data = _get_json(
+        painel,
+        "/logs-credit-consumptions",
+        params={"draw": 1, "start": 0, "length": 5},
+        headers=_headers_ajax(painel, "/logs-credit-consumptions"),
+    )
+
+    print("CHAVES:", list(data.keys()))
+    print("recordsTotal:", data.get("recordsTotal"))
+    print("recordsFiltered:", data.get("recordsFiltered"))
+
+    itens = data.get("data") or []
+    print("len(data):", len(itens))
+
+    if itens:
+        print("ITEM 0:", itens[0])
+        print("TRANSACTION_TYPES:", sorted({str(i.get('transaction_type') or i.get('type') or '') for i in itens}))
+        print("OWNER_IDS:", sorted({str(i.get('owner_id')) for i in itens}))
+        print("CREATED_AT:", [i.get("created_at") for i in itens])
+
+    return data
