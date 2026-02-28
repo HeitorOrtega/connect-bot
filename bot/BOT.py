@@ -62,7 +62,8 @@ MINIMO_RH = float(os.getenv("MINIMO_RH", "0.50"))
 # comissão: qual painel define o pool às 23:00
 COMMISSION_PAINEL = (os.getenv("COMMISSION_PAINEL", "T1") or "T1").upper().strip()
 
-CANAL_FINANCEIRO = int(os.getenv("CANAL_FINANCEIRO", "1470879727152664616"))
+CANAL_ALERTA = int(os.getenv("CANAL_ALERTA", "1470879727152664616"))
+CANAL_FINANCEIRO = int(os.getenv("CANAL_FINANCEIRO", "1477146613775601684"))
 HORARIOS_FINANCEIRO = {(15, 0), (23, 0)}
 
 BR_TIMEZONE = timezone(timedelta(hours=-3))
@@ -136,23 +137,17 @@ async def alertar_erro(msg: str, painel: Optional[str] = None) -> None:
         print(f"❌ Falha ao enviar alerta: {e}")
         
 @bot.command()
-async def testfat(ctx, painel: str = "T3"):
-    painel = (painel or "T3").upper().strip()
-
-    if painel not in CANAIS_FECHAMENTOS:
-        await ctx.send(f"❌ Painel inválido: `{painel}`. Disponíveis: {', '.join(CANAIS_FECHAMENTOS.keys())}")
-        return
-
-    msg = await ctx.send(f"⏳ Testando financeiro do **{painel}**...")
+async def testfat(ctx):
+    msg = await ctx.send("⏳ Testando faturamento consolidado...")
 
     try:
-        ok = await enviar_financeiro_diario(painel)
+        ok = await enviar_financeiro_consolidado()
         if ok:
-            await msg.edit(content=f"✅ Financeiro do **{painel}** enviado com sucesso.")
+            await msg.edit(content="✅ Faturamento consolidado enviado com sucesso.")
         else:
-            await msg.edit(content=f"⚠️ Falha no financeiro do **{painel}**. Veja o canal de alertas.")
+            await msg.edit(content="⚠️ Falha ao enviar faturamento consolidado.")
     except Exception as e:
-        await msg.edit(content=f"❌ Erro ao testar financeiro do **{painel}**: `{e}`")    
+        await msg.edit(content=f"❌ Erro ao testar faturamento: `{e}`")
 
 # =====================
 # COMANDO ÚNICO: TESTAR T2
@@ -225,105 +220,74 @@ def coletar_metricas_sync(painel: str) -> dict:
         "status": buscar_status_api(painel),
     }
 
-async def enviar_financeiro_diario(painel: str) -> bool:
-    painel = painel.upper().strip()
+async def enviar_financeiro_consolidado() -> bool:
+    paineis = list(CANAIS_FECHAMENTOS.keys())
 
     try:
-        dados = await asyncio.to_thread(buscar_financeiro_de_hoje, painel)
+        resultados = []
+        for painel in paineis:
+            dados = await asyncio.to_thread(buscar_financeiro_de_hoje, painel)
+            resultados.append(dados)
     except Exception as e:
         await alertar_erro(
-            f"Painel **{painel}**: falha ao buscar financeiro diário.\nErro: `{e}`",
-            painel=f"FIN_{painel}",
+            f"Falha ao buscar financeiro consolidado.\nErro: `{e}`",
+            painel="FINANCEIRO_GERAL",
         )
         return False
 
-    canal = bot.get_channel(CANAL_FINANCEIRO)
-    if canal is None:
-        canal = await bot.fetch_channel(CANAL_FINANCEIRO)
+    if not resultados:
+        return False
+
+    dia_ref = resultados[0].get("dia_ref")
+    dia_txt = dia_ref.strftime("%d/%m/%Y") if dia_ref else datetime.now(BR_TIMEZONE).strftime("%d/%m/%Y")
+
+    total_novos = sum(float(r.get("novos_total", 0) or 0) for r in resultados)
+    total_renov = sum(float(r.get("renov_total", 0) or 0) for r in resultados)
+    total_geral = sum(float(r.get("total_geral", 0) or 0) for r in resultados)
+
+    linhas = [f"📅 **{dia_txt}** • 🕒 {datetime.now(BR_TIMEZONE).strftime('%H:%M')}", ""]
+
+    nomes = {
+        "T1": "Painel 1",
+        "T2": "Painel 2",
+        "T3": "Painel 3",
+    }
+
+    for r in resultados:
+        painel = r["painel"]
+        nome_painel = nomes.get(painel, painel)
+
+        linhas.extend([
+            f"📌 **{nome_painel}**",
+            f"🆕 Novos: **{_fmt_money(r['novos_total'])}**",
+            f"🔄 Renov.: **{_fmt_money(r['renov_total'])}**",
+            f"💵 Total: **{_fmt_money(r['total_geral'])}**",
+            ""
+        ])
+
+    linhas.extend([
+        "📊 **Total geral**",
+        f"🆕 Novos: **{_fmt_money(total_novos)}**",
+        f"🔄 Renov.: **{_fmt_money(total_renov)}**",
+        f"💵 **Total: {_fmt_money(total_geral)}**",
+    ])
 
     embed = discord.Embed(
-        title=f"💰 Financeiro Diário — Painel {painel}",
+        title="💰 Faturamento — Todos os Painéis",
+        description="\n".join(linhas),
         color=0x2ECC71,
         timestamp=datetime.now(BR_TIMEZONE),
     )
 
-    embed.add_field(
-        name="🆕 Novos",
-        value=(
-            f"Qtd: **{dados['novos_qtd']}**\n"
-            f"Valor: **{_fmt_money(dados['novos_total'])}**"
-        ),
-        inline=False,
-    )
+    if os.path.exists(THUMB_PATH):
+        file_logo = discord.File(THUMB_PATH, filename="logo.png")
+        embed.set_thumbnail(url="attachment://logo.png")
+        canal = bot.get_channel(CANAL_FINANCEIRO) or await bot.fetch_channel(CANAL_FINANCEIRO)
+        await canal.send(embed=embed, file=file_logo)
+    else:
+        canal = bot.get_channel(CANAL_FINANCEIRO) or await bot.fetch_channel(CANAL_FINANCEIRO)
+        await canal.send(embed=embed)
 
-    embed.add_field(
-        name="🔄 Renovações",
-        value=(
-            f"Qtd: **{dados['renov_qtd']}**\n"
-            f"Valor: **{_fmt_money(dados['renov_total'])}**"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="📌 Total do dia",
-        value=f"**{_fmt_money(dados['total_geral'])}**",
-        inline=False,
-    )
-
-    embed.set_footer(text=f"Connect Financeiro • {INSTANCE_ID}")
-
-    await canal.send(embed=embed)
-    return True
-
-async def enviar_financeiro_diario(painel: str) -> bool:
-    painel = painel.upper().strip()
-
-    try:
-        dados = await asyncio.to_thread(buscar_financeiro_de_hoje, painel)
-    except Exception as e:
-        await alertar_erro(
-            f"Painel **{painel}**: falha ao buscar financeiro diário.\nErro: `{e}`",
-            painel=f"FIN_{painel}",
-        )
-        return False
-
-    canal = bot.get_channel(CANAL_FINANCEIRO)
-    if canal is None:
-        canal = await bot.fetch_channel(CANAL_FINANCEIRO)
-
-    embed = discord.Embed(
-        title=f"💰 Financeiro Diário — Painel {painel}",
-        color=0x2ECC71,
-        timestamp=datetime.now(BR_TIMEZONE),
-    )
-
-    embed.add_field(
-        name="🆕 Novos clientes",
-        value=(
-            f"Qtd: **{dados['novos_qtd']}**\n"
-            f"Valor: **{_fmt_money(dados['novos_total'])}**"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="🔄 Renovações",
-        value=(
-            f"Qtd: **{dados['renov_qtd']}**\n"
-            f"Valor: **{_fmt_money(dados['renov_total'])}**"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="📌 Total geral",
-        value=f"**{_fmt_money(dados['total_geral'])}**",
-        inline=False,
-    )
-
-    embed.set_footer(text=f"Connect Financeiro • {INSTANCE_ID}")
-    await canal.send(embed=embed)
     return True
 
 # =====================
@@ -519,13 +483,12 @@ async def scheduler_loop():
             if agora.date() == _ultimo_dia_do_mes(agora.date()):
                 await enviar_rh_mensal(agora.year, agora.month)
         # FINANCEIRO
+    # FINANCEIRO CONSOLIDADO
     if hm in HORARIOS_FINANCEIRO:
-        for painel in CANAIS_FECHAMENTOS:
-            key = f"FIN_SCHED_{painel}"
-            if ULTIMO_ENVIO.get(key) == chave_minuto:
-                continue
+        key = "FINANCEIRO_GERAL"
+        if ULTIMO_ENVIO.get(key) != chave_minuto:
             ULTIMO_ENVIO[key] = chave_minuto
-            await enviar_financeiro_diario(painel)
+            await enviar_financeiro_consolidado()
 
 # =====================
 # READY

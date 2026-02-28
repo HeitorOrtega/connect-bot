@@ -14,7 +14,7 @@ BR_TIMEZONE = timezone(timedelta(hours=-3))
 OWNER_ID_POR_PAINEL = {
     "T1": 157,
     "T2": 156,
-    "T3": 158,  # teste
+    "T3": 160,  
 }
 
 # =====================
@@ -385,3 +385,108 @@ def debug_logs(painel: str):
         print("OWNER_IDS:", sorted({str(i.get('owner_id')) for i in itens}))
         print("CREATED_AT:", [i.get("created_at") for i in itens])
     return data
+
+def _data_referencia_financeiro() -> datetime.date:
+    """
+    Se testar logo após a meia-noite, usa o dia anterior para não vir zerado.
+    """
+    agora = datetime.now(BR_TIMEZONE)
+    if agora.hour < 3:
+        return (agora - timedelta(days=1)).date()
+    return agora.date()
+
+
+def _buscar_revenues_filtrado(
+    painel: str,
+    transaction_type: str,
+    dia_ref=None,
+    page_size: int = 200
+) -> Dict:
+    if dia_ref is None:
+        dia_ref = _data_referencia_financeiro()
+
+    owner_id = _owner_do_painel(painel)
+    start = 0
+    total_qtd = 0
+    total_valor = 0.0
+
+    while True:
+        data = _get_json(
+            painel,
+            "/revenues",
+            params={
+                "draw": 1,
+                "start": start,
+                "length": page_size,
+            },
+            headers=_headers_ajax(painel, "/revenues")
+        )
+
+        itens = data.get("data") or []
+        if not itens:
+            break
+
+        for item in itens:
+            oid = _to_int(item.get("owner_id"))
+            if oid != owner_id:
+                continue
+
+            t = str(item.get("transaction_type") or "").strip().lower()
+            if t != transaction_type:
+                continue
+
+            dt = _parse_created_at_br(item.get("created_at", ""))
+            if not dt or dt.date() != dia_ref:
+                continue
+
+            total_qtd += 1
+            total_valor += _to_float(item.get("value"))
+
+        start += page_size
+
+    return {
+        "qtd": total_qtd,
+        "valor": round(total_valor, 2),
+        "dia_ref": dia_ref,
+    }
+
+
+def buscar_novos_clientes_de_hoje(painel: str, page_size: int = 200) -> Dict:
+    r = _buscar_revenues_filtrado(painel, "novo_cliente", page_size=page_size)
+    return {
+        "total_hoje": r["qtd"],
+        "valor_total": r["valor"],
+        "dia_ref": r["dia_ref"],
+    }
+
+
+def buscar_renovacoes_de_hoje(painel: str, page_size: int = 200) -> Dict:
+    r = _buscar_revenues_filtrado(painel, "renovacao", page_size=page_size)
+    return {
+        "total_hoje": r["qtd"],
+        "valor_total": r["valor"],
+        "dia_ref": r["dia_ref"],
+    }
+
+
+def buscar_financeiro_de_hoje(painel: str, page_size: int = 200) -> Dict:
+    novos = buscar_novos_clientes_de_hoje(painel, page_size=page_size)
+    renov = buscar_renovacoes_de_hoje(painel, page_size=page_size)
+
+    novos_qtd = int(novos.get("total_hoje", 0) or 0)
+    novos_total = float(novos.get("valor_total", 0.0) or 0.0)
+
+    renov_qtd = int(renov.get("total_hoje", 0) or 0)
+    renov_total = float(renov.get("valor_total", 0.0) or 0.0)
+
+    dia_ref = novos.get("dia_ref") or renov.get("dia_ref") or _data_referencia_financeiro()
+
+    return {
+        "painel": painel,
+        "dia_ref": dia_ref,
+        "novos_qtd": novos_qtd,
+        "novos_total": round(novos_total, 2),
+        "renov_qtd": renov_qtd,
+        "renov_total": round(renov_total, 2),
+        "total_geral": round(novos_total + renov_total, 2),
+    }
